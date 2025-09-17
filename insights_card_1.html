@@ -12,7 +12,7 @@
     body {
       font-family: 'Roboto', sans-serif;
       line-height: 1.6;
-      color: #4e1c2c;
+      color: #4e1c2c; /* Text color */
       background-color: #ffffff;
       margin: 0;
       padding: 0;
@@ -26,38 +26,45 @@
     }
     h1, h2 {
       font-weight: 700;
-      color: #4e1c2c;
+      color: #4e1c2c; /* Text color */
       display: flex;
       align-items: center;
     }
     h1 i, h2 i {
-      color: #5bba47;
       margin-right: 10px;
+      font-size: 1.5em;
+      background: linear-gradient(45deg, #4e1c2c, #a8d7e8, #5bba47);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
     p {
       margin-bottom: 1rem;
+      color: #4e1c2c; /* Text color */
     }
     ul {
       margin-left: 20px;
     }
     ul li {
       margin-bottom: 0.5rem;
+      color: #4e1c2c; /* Text color */
     }
     strong {
-      color: #a8d7e8;
+      color: #4e1c2c; /* Text color */
     }
     .btn-primary {
       display: inline-block;
-      background-color: #5bba47;
+      background: linear-gradient(45deg, #4e1c2c, #a8d7e8, #5bba47);
       color: #ffffff;
       text-decoration: none;
       padding: 10px 20px;
       border-radius: 5px;
       font-weight: 500;
-      transition: background-color 0.3s ease;
+      box-shadow: 0 4px 8px rgba(78, 28, 44, 0.3);
+      transition: transform 0.2s, box-shadow 0.2s;
     }
     .btn-primary:hover {
-      background-color: #4e1c2c;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 12px rgba(78, 28, 44, 0.4);
     }
   </style>
 </head>
@@ -65,14 +72,14 @@
   <section class="ai-agents-insights">
     <div class="container">
       <h1><i class="fas fa-chart-line"></i> E-Cognitech’s Insights: How AI Agents Are Reshaping Enterprise Operations</h1>
-      <p>At <strong>E-Cognitech</strong>, we are at the forefront of the AI revolution, empowering businesses to harness the full potential of AI agents. These intelligent systems are not just enhancing efficiency—they are redefining how enterprises operate, make decisions, and deliver value.</p>
+      <p>At E-Cognitech, we are at the forefront of the AI revolution, empowering businesses to harness the full potential of AI agents. These intelligent systems are not just enhancing efficiency—they are redefining how enterprises operate, make decisions, and deliver value.</p>
 
       <h2><i class="fas fa-arrow-up-right-from-square"></i> The AI Agents Market: A Surge in Adoption</h2>
       <p>The global AI agents market is experiencing unprecedented growth:</p>
       <ul>
-        <li><strong>2024 Market Size:</strong> USD <strong>5.4 billion</strong></li>
-        <li><strong>2030 Projected Size:</strong> USD <strong>50.31 billion</strong></li>
-        <li><strong>Compound Annual Growth Rate (CAGR):</strong> <strong>45.8%</strong></li>
+        <li><strong>2024 Market Size:</strong> USD 5.4 billion</li>
+        <li><strong>2030 Projected Size:</strong> USD 50.31 billion</li>
+        <li><strong>Compound Annual Growth Rate (CAGR):</strong> 45.8%</li>
       </ul>
       <p>This rapid expansion underscores the increasing reliance on AI agents to streamline operations and drive business success.</p>
 
