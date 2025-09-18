@@ -17,13 +17,16 @@
       margin: 0;
       padding: 0;
     }
+
     .ai-agents-insights {
       padding: 60px 20px;
     }
+
     .container {
       max-width: 800px;
       margin: 0 auto;
     }
+
     h1, h2 {
       font-weight: 700;
       color: #4e1c2c;
@@ -32,12 +35,15 @@
       margin-top: 40px;
       margin-bottom: 20px;
     }
+
     h1 {
       font-size: 2em;
     }
+
     h2 {
       font-size: 1.5em;
     }
+
     h1 i, h2 i {
       margin-right: 12px;
       font-size: 1.5em;
@@ -45,35 +51,61 @@
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
+
     p {
       margin-bottom: 20px;
       color: #4e1c2c;
     }
+
     ul {
       margin-left: 20px;
       margin-bottom: 20px;
     }
+
     ul li {
       margin-bottom: 10px;
       color: #4e1c2c;
     }
+
     strong {
       color: #4e1c2c;
     }
+
+    /* Unified Button Style */
+    button,
     .btn-primary {
       display: inline-block;
-      background: linear-gradient(45deg, #4e1c2c 50%, #5bba47 70%, #a8d7e8 90%);
+      padding: 1rem 2rem;
+      background: linear-gradient(135deg, #4e1c2c, #a8d7e8, #5bba47);
       color: #ffffff;
+      border: none;
+      border-radius: 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      font-family: 'Roboto', sans-serif;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+      text-align: center;
       text-decoration: none;
-      padding: 12px 24px;
-      border-radius: 6px;
-      font-weight: 500;
-      box-shadow: 0 4px 8px rgba(78, 28, 44, 0.4);
-      transition: transform 0.2s, box-shadow 0.2s;
     }
+
+    button:hover,
     .btn-primary:hover {
+      background: linear-gradient(135deg, #5bba47, #a8d7e8, #4e1c2c);
       transform: translateY(-2px);
-      box-shadow: 0 6px 12px rgba(78, 28, 44, 0.5);
+    }
+
+    /* Image Styling */
+    .insight-img {
+      width: 80%;
+      max-width: 650px;
+      height: auto;
+      border-radius: 12px;
+      margin: 20px 0;
+      display: block;
+      margin-left: 0; /* strictly left aligned */
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }
   </style>
 </head>
@@ -84,6 +116,11 @@
       <p>At E-Cognitech, we are at the forefront of the AI revolution, empowering businesses to harness the full potential of AI agents. These intelligent systems are not just enhancing efficiency—they are redefining how enterprises operate, make decisions, and deliver value.</p>
 
       <h2><i class="fas fa-arrow-up-right-from-square"></i> The AI Agents Market: A Surge in Adoption</h2>
+      <!-- Inserted Image -->
+      <img src="https://raw.githubusercontent.com/joybrotodey/demo_web_media/main/insights_card1_img.jpg" 
+           alt="AI Agents Market Growth" 
+           class="insight-img" />
+
       <p>The global AI agents market is experiencing unprecedented growth:</p>
       <ul>
         <li><strong>2024 Market Size:</strong> USD 5.4 billion</li>
@@ -137,7 +174,7 @@
 
       <h2><i class="fas fa-phone"></i> Ready to Transform Your Enterprise?</h2>
       <p>Contact us today to learn how E-Cognitech can help you leverage AI agents to enhance efficiency, reduce costs, and stay ahead in a competitive market.</p>
-      <a href="/contact" class="btn btn-primary">Get in Touch</a>
+      <a href="/contact" class="btn-primary">Get in Touch</a>
     </div>
   </section>
 </body>
