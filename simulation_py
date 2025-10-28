@@ -1,0 +1,657 @@
+# app.py — RSQ Simulator Pro (Demo-ready, optimized, branded with Invent logo)
+# Dependencies: streamlit, pandas, numpy, scipy, plotly
+# Run: streamlit run app.py
+
+import os
+import json
+import math
+import time
+from pathlib import Path
+from typing import Tuple, Dict, List
+
+import numpy as np
+import pandas as pd
+from scipy.stats import norm
+import streamlit as st
+import plotly.graph_objects as go
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+
+# ----------------------------
+# Page config & minimal CSS
+# ----------------------------
+st.set_page_config(
+    page_title="RSQ Simulator",
+    page_icon="📦",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+LOGO_URL = "https://raw.githubusercontent.com/joybrotodey/demo_web_media/main/logo-transparent-png.png"
+
+st.markdown(
+    f"""
+    <style>
+    /* General */
+    .main > div {{
+        padding: 1rem 1rem;
+    }}
+    h1, h2, h3 {{ font-family: Inter, sans-serif; color:#0f172a; }}
+    /* Sidebar */
+    section[data-testid="stSidebar"] {{
+        background-color: #f9fafb;
+        border-right: 1px solid #e6eef8;
+        padding-top: 1rem;
+    }}
+    /* Buttons */
+    div.stButton > button {{
+        border-radius: 8px;
+        background: linear-gradient(90deg,#2563eb,#3b82f6);
+        color: #fff;
+        font-weight: 600;
+        border: none;
+    }}
+    div.stButton > button:hover {{
+        transform: translateY(-2px);
+    }}
+    /* Metric value */
+    [data-testid="stMetricValue"] {{ color: #1e3a8a; font-weight: 700; }}
+    /* Card */
+    .card {{ background: #fff; padding: 1rem; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.04); }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ----------------------------
+# Utility: config loader
+# ----------------------------
+def load_config_if_exists(config_path: str = "config.json") -> dict:
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+CFG = load_config_if_exists()
+
+# ----------------------------
+# File helpers
+# ----------------------------
+@st.cache_data(show_spinner=False)
+def find_csv_files(data_folder: str) -> Dict[str, str]:
+    files = {}
+    p = Path(data_folder)
+    if not p.exists():
+        return files
+    for f in p.glob("*.csv"):
+        files[f.stem.lower()] = str(f)
+    return files
+
+# ----------------------------
+# Preprocess — tuned for speed
+# ----------------------------
+@st.cache_data(show_spinner=False)
+def preprocess_all(
+    sales_path: str,
+    po_path: str,
+    item_master_path: str,
+    output_path: str,
+) -> pd.DataFrame:
+    os.makedirs(output_path, exist_ok=True)
+
+    # Expected columns (we'll read all and then validate)
+    sales = pd.read_csv(sales_path, parse_dates=["date"], low_memory=False)
+    po = pd.read_csv(po_path, parse_dates=["order_date", "receipt_date"], low_memory=False)
+    item_master = pd.read_csv(item_master_path, low_memory=False)
+
+    # Validate
+    required_sales = {"item_id", "date", "units_sold", "on_hand_start", "on_hand_end", "stockout_flag"}
+    required_po = {"po_number", "item_id", "supplier_id", "order_date", "receipt_date",
+                   "order_qty", "received_qty", "lead_time_days", "unit_cost"}
+    required_item = {"item_id", "item_name", "unit_cost", "annual_holding_rate",
+                     "ordering_cost", "service_level_target", "replenishment_lead_time_days"}
+
+    if not required_sales.issubset(sales.columns):
+        raise ValueError(f"sales missing columns: {sorted(required_sales - set(sales.columns))}")
+    if not required_po.issubset(po.columns):
+        raise ValueError(f"po missing columns: {sorted(required_po - set(po.columns))}")
+    if not required_item.issubset(item_master.columns):
+        raise ValueError(f"item_master missing columns: {sorted(required_item - set(item_master.columns))}")
+
+    # Coerce numeric
+    sales["units_sold"] = pd.to_numeric(sales["units_sold"], errors="coerce").fillna(0.0)
+    sales["on_hand_end"] = pd.to_numeric(sales["on_hand_end"], errors="coerce").fillna(0.0)
+    sales["on_hand_start"] = pd.to_numeric(sales["on_hand_start"], errors="coerce").fillna(0.0)
+    sales["stockout_flag"] = pd.to_numeric(sales["stockout_flag"], errors="coerce").fillna(0)
+
+    po["order_qty"] = pd.to_numeric(po["order_qty"], errors="coerce").fillna(0.0)
+    po["received_qty"] = pd.to_numeric(po["received_qty"], errors="coerce").fillna(0.0)
+    po["unit_cost"] = pd.to_numeric(po["unit_cost"], errors="coerce").fillna(0.0)
+    po["lead_time_days"] = (po["receipt_date"] - po["order_date"]).dt.days.clip(lower=0)
+
+    item_master["unit_cost"] = pd.to_numeric(item_master["unit_cost"], errors="coerce").fillna(0.0)
+    item_master["annual_holding_rate"] = pd.to_numeric(item_master["annual_holding_rate"], errors="coerce").fillna(0.0)
+    item_master["ordering_cost"] = pd.to_numeric(item_master["ordering_cost"], errors="coerce").fillna(0.0)
+    item_master["service_level_target"] = pd.to_numeric(item_master["service_level_target"], errors="coerce").fillna(0.95)
+    item_master["replenishment_lead_time_days"] = pd.to_numeric(item_master["replenishment_lead_time_days"], errors="coerce").fillna(0.0)
+
+    # Demand stats
+    daily = sales.groupby(["item_id", "date"], as_index=False)["units_sold"].sum().rename(columns={"units_sold": "demand_qty"})
+    demand_stats = daily.groupby("item_id")["demand_qty"].agg(mean_daily_demand="mean", std_daily_demand="std").reset_index()
+    demand_stats["std_daily_demand"] = demand_stats["std_daily_demand"].fillna(0.0)
+    demand_stats["mean_daily_demand"] = demand_stats["mean_daily_demand"].fillna(0.0)
+
+    # Lead stats
+    lead_stats = po.groupby("item_id", as_index=False)["lead_time_days"].mean().rename(columns={"lead_time_days": "avg_lead_time"})
+
+    # Merge
+    merged = item_master.merge(demand_stats, on="item_id", how="left").merge(lead_stats, on="item_id", how="left")
+    merged["mean_daily_demand"] = merged["mean_daily_demand"].fillna(0.0)
+    merged["std_daily_demand"] = merged["std_daily_demand"].fillna(0.0)
+    merged["avg_lead_time"] = merged["avg_lead_time"].fillna(merged["replenishment_lead_time_days"].fillna(0.0))
+
+    merged["holding_cost_per_unit_per_day"] = merged["unit_cost"] * merged["annual_holding_rate"] / 365.0
+    merged["annual_demand"] = merged["mean_daily_demand"] * 365.0
+    merged["annual_holding_cost_per_unit"] = merged["holding_cost_per_unit_per_day"] * 365.0
+
+    # last inventory state
+    last_inv = sales.sort_values("date").groupby("item_id", as_index=False).last()[["item_id", "on_hand_end"]]
+    merged = merged.merge(last_inv, on="item_id", how="left")
+    merged["on_hand_end"] = merged["on_hand_end"].fillna(0.0)
+    merged["inventory_value"] = merged["on_hand_end"] * merged["unit_cost"]
+
+    out_path = os.path.join(output_path, "item_summary.csv")
+    merged.to_csv(out_path, index=False)
+    return merged
+
+# ----------------------------
+# Simulation (fast, vectorized where possible)
+# ----------------------------
+def run_rsq_simulation_for_item_fast(
+    row: pd.Series,
+    service_level: float,
+    lead_time_multiplier: float,
+    holding_cost_multiplier: float,
+    ordering_cost_multiplier: float,
+    horizon_days: int,
+    stockout_unit_penalty: float,
+    random_seed: int
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Fast per-item RSQ simulation:
+    - Generates demand vectorized via numpy RNG
+    - Runs a tight python loop with local variables for speed
+    """
+    rng = np.random.default_rng(int(random_seed))
+    mu = float(row.get("mean_daily_demand", 0.0) or 0.0)
+    sigma = abs(float(row.get("std_daily_demand", 0.0) or 0.0))
+    base_lead = float(row.get("avg_lead_time", np.nan))
+    if math.isnan(base_lead):
+        base_lead = float(row.get("replenishment_lead_time_days", 0.0) or 0.0)
+    L = max(0.0, base_lead * float(lead_time_multiplier))
+
+    h_per_day = float(row.get("holding_cost_per_unit_per_day", 0.0)) * float(holding_cost_multiplier)
+    K = float(row.get("ordering_cost", 0.0)) * float(ordering_cost_multiplier)
+
+    safe_sl = np.clip(service_level, 1e-6, 1 - 1e-6)
+    z = norm.ppf(safe_sl)
+
+    R = mu * L + z * sigma * math.sqrt(L) if L > 0 else mu * L
+    D = mu * 365.0
+    H = h_per_day * 365.0
+    Q = math.sqrt((2.0 * D * K) / H) if (H > 0 and K > 0 and D > 0) else max(1.0, math.sqrt(max(0.0, 2.0 * D * K)))
+    S = R + Q
+
+    lead_days_int = int(math.ceil(L)) if L > 0 else 0
+
+    inventory = float(S)
+    on_order = 0.0
+    next_delivery_day = -1
+
+    # Vectorized demands
+    horizon_days = int(max(1, horizon_days))
+    demand_arr = rng.normal(loc=mu, scale=sigma, size=horizon_days) if sigma > 0 else np.full(horizon_days, mu)
+    demand_arr = np.clip(demand_arr, 0.0, None)
+
+    inv_trace = np.empty(horizon_days, dtype=float)
+    stockout_trace = np.zeros(horizon_days, dtype=float)
+    orders_count = 0
+
+    for d_ix in range(horizon_days):
+        # receive
+        if next_delivery_day == d_ix and on_order > 0:
+            inventory += on_order
+            on_order = 0.0
+            next_delivery_day = -1
+
+        d = float(demand_arr[d_ix])
+        if inventory >= d:
+            inventory -= d
+        else:
+            stockout_trace[d_ix] = d - inventory
+            inventory = 0.0
+
+        if inventory <= R and on_order == 0.0:
+            orders_count += 1
+            on_order = float(Q)
+            if lead_days_int <= 0:
+                inventory += on_order
+                on_order = 0.0
+            else:
+                next_delivery_day = d_ix + lead_days_int
+
+        inv_trace[d_ix] = inventory
+
+    total_demand = float(demand_arr.sum())
+    total_stockout = float(stockout_trace.sum())
+    fill_rate = 1.0 - (total_stockout / total_demand) if total_demand > 0 else 1.0
+    avg_inv = float(inv_trace.mean())
+
+    ordering_cost = orders_count * K
+    holding_cost = avg_inv * h_per_day * horizon_days
+    penalty_cost = total_stockout * float(stockout_unit_penalty)
+    total_cost = ordering_cost + holding_cost + penalty_cost
+
+    metrics = {
+        "item_id": row.get("item_id"),
+        "item_name": row.get("item_name"),
+        "R": round(R, 2),
+        "Q": round(Q, 2),
+        "S": round(S, 2),
+        "fill_rate": round(fill_rate, 4),
+        "avg_inventory": round(avg_inv, 2),
+        "total_orders": int(orders_count),
+        "ordering_cost": round(ordering_cost, 2),
+        "holding_cost": round(holding_cost, 2),
+        "penalty_cost": round(penalty_cost, 2),
+        "total_cost": round(total_cost, 2),
+    }
+
+    trace_df = pd.DataFrame({
+        "day": np.arange(1, horizon_days + 1),
+        "demand": demand_arr,
+        "inventory": inv_trace,
+        "stockout": stockout_trace
+    })
+
+    return trace_df, metrics
+
+# Worker wrapper (top-level so picklable)
+def _worker_simulation_fast(row_dict: dict,
+                            service_level: float,
+                            lead_mult: float,
+                            hold_mult: float,
+                            order_mult: float,
+                            horizon: int,
+                            penalty: float,
+                            seed_for_sku: int) -> dict:
+    row = pd.Series(row_dict)
+    try:
+        _, m = run_rsq_simulation_for_item_fast(
+            row=row,
+            service_level=service_level,
+            lead_time_multiplier=lead_mult,
+            holding_cost_multiplier=hold_mult,
+            ordering_cost_multiplier=order_mult,
+            horizon_days=horizon,
+            stockout_unit_penalty=penalty,
+            random_seed=seed_for_sku,
+        )
+    except Exception as e:
+        m = {"item_id": "ERROR", "item_name": str(e), "fill_rate": 0.0,
+             "avg_inventory": 0.0, "total_cost": float("inf"),
+             "ordering_cost": 0.0, "holding_cost": 0.0, "penalty_cost": 0.0}
+    return m
+
+# ----------------------------
+# Robust batch runner (progress + ETA + fallback)
+# ----------------------------
+def run_batch_skus_fast(
+    skus_df: pd.DataFrame,
+    service_level: float,
+    lead_mult: float,
+    hold_mult: float,
+    order_mult: float,
+    horizon: int,
+    penalty: float,
+    seed: int,
+    seed_offset: int = 0,
+    max_workers: int = 0,
+    parallel: bool = True,
+) -> pd.DataFrame:
+    """
+    Runs simulations for all SKUs in skus_df and returns a DataFrame of metrics.
+    Tries ProcessPoolExecutor; falls back to ThreadPoolExecutor on errors.
+    """
+    total_items = len(skus_df)
+    if total_items == 0:
+        return pd.DataFrame()
+
+    rows_serialized = [r.to_dict() for _, r in skus_df.iterrows()]
+    cpu_count = os.cpu_count() or 1
+    workers = min(cpu_count, int(max_workers)) if int(max_workers) > 0 else cpu_count
+    workers = max(1, workers)
+    use_parallel = bool(parallel) and workers > 1
+
+    progress_bar = st.progress(0.0)
+    status_text = st.empty()
+    eta_text = st.empty()
+    start_all = time.perf_counter()
+
+    all_metrics: List[dict] = []
+    done = 0
+    cumulative_time = 0.0
+
+    # Prebuild task tuples to avoid closure overhead
+    tasks = []
+    for i, row_dict in enumerate(rows_serialized):
+        seed_for_sku = int(seed) + int(seed_offset) + i
+        tasks.append((row_dict, float(service_level), float(lead_mult), float(hold_mult),
+                      float(order_mult), int(horizon), float(penalty), seed_for_sku))
+
+    def _run_with_executor(executor_cls):
+        nonlocal done, cumulative_time
+        with executor_cls(max_workers=workers) as ex:
+            futures = [ex.submit(_worker_simulation_fast, *args) for args in tasks]
+            loop_start = time.perf_counter()
+            for fut in as_completed(futures):
+                t_now = time.perf_counter()
+                try:
+                    m = fut.result()
+                except Exception as e:
+                    m = {"item_id": "ERROR", "item_name": str(e), "fill_rate": 0.0,
+                         "avg_inventory": 0.0, "total_cost": float("inf"),
+                         "ordering_cost": 0.0, "holding_cost": 0.0, "penalty_cost": 0.0}
+                all_metrics.append(m)
+                done += 1
+                elapsed = time.perf_counter() - loop_start
+                cumulative_time += elapsed
+                avg_time_per_item = cumulative_time / done if done > 0 else None
+                remaining = max(0, total_items - done)
+                eta_seconds = int(avg_time_per_item * remaining) if avg_time_per_item is not None else None
+                eta_text.text(f"Estimated time remaining: {eta_seconds}s" if eta_seconds is not None else "calculating...")
+                progress_bar.progress(done / total_items)
+                status_text.text(f"Completed {done}/{total_items} — last SKU: {m.get('item_id')}")
+                loop_start = time.perf_counter()
+
+    # Try process pool first (speed), but fallback to threads if anything fails
+    try:
+        if use_parallel:
+            try:
+                _run_with_executor(ProcessPoolExecutor)
+            except Exception as e:
+                st.warning(f"ProcessPool failed ({e}). Falling back to ThreadPoolExecutor.")
+                _run_with_executor(ThreadPoolExecutor)
+        else:
+            _run_with_executor(ThreadPoolExecutor)
+    finally:
+        progress_bar.empty()
+        status_text.empty()
+        eta_text.empty()
+
+    elapsed_all = time.perf_counter() - start_all
+    st.success(f"Batch simulation complete — ran {len(all_metrics)} SKUs in {int(elapsed_all)}s.")
+    return pd.DataFrame(all_metrics)
+
+# ----------------------------
+# Streamlit UI with pages/tabs
+# ----------------------------
+def main():
+    st.sidebar.image(LOGO_URL, use_column_width=True)
+    st.sidebar.markdown("### RSQ Simulator\nAdvanced (R,S,Q) Inventory Simulation")
+    st.sidebar.markdown("---")
+
+    page = st.sidebar.radio("Navigate", ["Dashboard", "Results", "Settings", "Data"], index=0)
+
+    # Data inputs (upload OR folder)
+    st.sidebar.header("Data Inputs")
+    upload_mode = st.sidebar.selectbox("Upload mode", ["Folder path (default)", "Upload CSVs"])
+    data_folder = st.sidebar.text_input("Data folder (contains CSVs)", value=CFG.get("data_path", "./synthetic_data"))
+    output_folder = st.sidebar.text_input("Output folder", value=CFG.get("output_path", "./processed_data"))
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Uploaders (optional)
+    sales_up = po_up = item_up = None
+    if upload_mode == "Upload CSVs":
+        sales_up = st.sidebar.file_uploader("Sales History CSV", type="csv")
+        po_up = st.sidebar.file_uploader("Purchase Orders CSV", type="csv")
+        item_up = st.sidebar.file_uploader("Item Master CSV", type="csv")
+
+    st.sidebar.markdown("---")
+    st.sidebar.header("Simulation Controls")
+    seed = st.sidebar.number_input("Random Seed", 0, 999999, int(CFG.get("random_seed", 42)))
+    service_level = st.sidebar.slider("Service Level", 0.5, 0.999, float(CFG.get("default_service_level", 0.95)), 0.005)
+    lead_mult = st.sidebar.slider("Lead Time Multiplier", 0.1, 3.0, float(CFG.get("lead_time_multiplier", 1.0)))
+    hold_mult = st.sidebar.slider("Holding Cost Multiplier", 0.1, 3.0, float(CFG.get("holding_cost_multiplier", 1.0)))
+    order_mult = st.sidebar.slider("Ordering Cost Multiplier", 0.1, 3.0, float(CFG.get("ordering_cost_multiplier", 1.0)))
+    horizon = st.sidebar.number_input("Horizon (days)", 7, 730, int(CFG.get("default_horizon_days", 90)))
+    penalty = st.sidebar.number_input("Stockout penalty/unit", 0.0, 1000.0, float(CFG.get("stockout_unit_penalty", 5.0)))
+    st.sidebar.markdown("---")
+    st.sidebar.header("Batch Options")
+    batch_parallel = st.sidebar.checkbox("Use parallel execution", value=True)
+    batch_workers = st.sidebar.number_input("Max workers (0=auto)", 0, 128, 0)
+    batch_max_items = st.sidebar.number_input("Max SKUs to run (0=all)", 0, 1000000, 0)
+    batch_seed_offset = st.sidebar.number_input("Seed offset (batch)", 0, 1000000, 0)
+    preview_sample_size = st.sidebar.number_input("Preview sample size", 1, 100, 5)
+
+    # Load or read processed summary
+    processed_df = None
+    try:
+        if upload_mode == "Upload CSVs" and sales_up and po_up and item_up:
+            st.info("Preprocessing uploaded CSVs...")
+            # save temporary files to a temp folder so preprocess_all can read by path
+            tmp_folder = os.path.join(output_folder, "_uploads_temp")
+            os.makedirs(tmp_folder, exist_ok=True)
+            sales_path = os.path.join(tmp_folder, "sales_history.csv")
+            po_path = os.path.join(tmp_folder, "purchase_orders.csv")
+            item_path = os.path.join(tmp_folder, "item_master.csv")
+            with open(sales_path, "wb") as f:
+                f.write(sales_up.getbuffer())
+            with open(po_path, "wb") as f:
+                f.write(po_up.getbuffer())
+            with open(item_path, "wb") as f:
+                f.write(item_up.getbuffer())
+
+            processed_df = preprocess_all(sales_path, po_path, item_path, output_folder)
+        else:
+            # try to find csvs in data_folder
+            csvs = find_csv_files(data_folder)
+            if csvs:
+                detected_sales = next((v for k, v in csvs.items() if "sales" in k), None)
+                detected_po = next((v for k, v in csvs.items() if "purchase" in k or "po" in k), None)
+                detected_item = next((v for k, v in csvs.items() if "item" in k), None)
+                # if all present, preprocess (idempotent because of caching)
+                if detected_sales and detected_po and detected_item:
+                    processed_path = os.path.join(output_folder, "item_summary.csv")
+                    if os.path.exists(processed_path):
+                        try:
+                            processed_df = pd.read_csv(processed_path)
+                        except Exception:
+                            processed_df = preprocess_all(detected_sales, detected_po, detected_item, output_folder)
+                    else:
+                        processed_df = preprocess_all(detected_sales, detected_po, detected_item, output_folder)
+                else:
+                    st.sidebar.warning("Could not detect all required CSVs in folder. Upload CSVs or check folder.")
+            else:
+                st.sidebar.warning("No CSVs found in specified folder. Upload CSVs or check folder.")
+    except Exception as e:
+        st.error(f"Preprocessing error: {e}")
+        processed_df = None
+
+    # Ensure processed_df is available as a DataFrame
+    if processed_df is None:
+        processed_df = pd.DataFrame()
+
+    # Page: Dashboard
+    if page == "Dashboard":
+        # Header
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;gap:12px;">
+            <div style="display:flex;align-items:center;gap:12px;">
+            <div>
+            <h4 style="margin:0;">Intelligent Inventory Optimization &amp; Demand Planning Dashboard</h4>
+            <div style="color:#475569">RSQ Simulator</div>
+            </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown("---")
+
+        col1, col2, col3 = st.columns([1, 1, 1])
+        if not processed_df.empty:
+            avg_fill = processed_df.get("mean_daily_demand", pd.Series()).mean()  # placeholder if not simulated
+            col1.metric("SKUs available", f"{len(processed_df)}")
+            col2.metric("Avg mean daily demand (raw)", f"{avg_fill:.2f}")
+            col3.metric("Default Service Level", f"{service_level:.3f}")
+        else:
+            col1.metric("SKUs available", "0")
+            col2.metric("Avg mean daily demand (raw)", "—")
+            col3.metric("Default Service Level", f"{service_level:.3f}")
+
+        st.markdown("### Quick Actions")
+        st.write(
+            "Use the **Data** tab to upload or point to CSVs. Use **Settings** to tune defaults. "
+            "Run a quick preview from the sidebar to estimate batch time, or run a full batch to compute R,S,Q for all SKUs."
+        )
+
+        st.markdown("### Preview Run")
+        if st.button("Run Preview (sample)"):
+            if processed_df.empty:
+                st.error("No processed SKUs available. Provide CSVs in Data tab.")
+            else:
+                sample = processed_df.sample(min(int(preview_sample_size), len(processed_df)), random_state=seed)
+                st.info(f"Running preview for {len(sample)} SKUs...")
+                preview_metrics = run_batch_skus_fast(
+                    sample, service_level, lead_mult, hold_mult, order_mult,
+                    int(horizon), penalty, seed=int(seed), seed_offset=int(batch_seed_offset),
+                    max_workers=int(batch_workers), parallel=batch_parallel
+                )
+                st.dataframe(preview_metrics)
+                st.download_button("Download Preview CSV", data=preview_metrics.to_csv(index=False).encode("utf-8"),
+                                   file_name="preview_metrics.csv", mime="text/csv")
+
+    # Page: Results
+    elif page == "Results":
+        st.header("Results")
+        if "last_batch_metrics" not in st.session_state:
+            st.session_state["last_batch_metrics"] = pd.DataFrame()
+
+        if st.button("Run Full Batch"):
+            if processed_df.empty:
+                st.error("No processed SKUs available — upload CSVs or point folder in Data tab.")
+            else:
+                skus_full = processed_df if int(batch_max_items) <= 0 else processed_df.head(int(batch_max_items))
+                st.info(f"Starting full batch for {len(skus_full)} SKUs...")
+                metrics_df = run_batch_skus_fast(
+                    skus_full, service_level, lead_mult, hold_mult, order_mult,
+                    int(horizon), penalty, seed=int(seed), seed_offset=int(batch_seed_offset),
+                    max_workers=int(batch_workers), parallel=batch_parallel
+                )
+                if not metrics_df.empty:
+                    st.session_state["last_batch_metrics"] = metrics_df
+
+        metrics_df = st.session_state.get("last_batch_metrics", pd.DataFrame())
+        if not metrics_df.empty:
+            st.subheader("Batch Metrics Summary")
+            # coerce numeric
+            for c in ["fill_rate", "avg_inventory", "ordering_cost", "holding_cost", "penalty_cost", "total_cost"]:
+                if c in metrics_df.columns:
+                    metrics_df[c] = pd.to_numeric(metrics_df[c], errors="coerce")
+            avg_fill = metrics_df["fill_rate"].mean()
+            avg_inv = metrics_df["avg_inventory"].mean()
+            total_cost = metrics_df["total_cost"].sum()
+
+            a, b, c = st.columns(3)
+            a.metric("Average Fill Rate", f"{avg_fill:.2%}")
+            b.metric("Average Inventory", f"{avg_inv:,.1f} units")
+            c.metric("Total Cost (sum)", f"${total_cost:,.2f}")
+
+            st.plotly_chart(
+                go.Figure(
+                    data=[go.Histogram(x=metrics_df["fill_rate"].dropna(), nbinsx=25)],
+                    layout=go.Layout(title="Fill Rate Distribution")
+                ),
+                use_container_width=True
+            )
+
+            st.dataframe(metrics_df.sort_values("total_cost").reset_index(drop=True))
+            st.download_button("Download Batch Metrics CSV", data=metrics_df.to_csv(index=False).encode("utf-8"),
+                               file_name="batch_metrics.csv", mime="text/csv")
+        else:
+            st.info("No batch results to show. Run a full batch run to compute metrics.")
+
+    # Page: Settings
+    elif page == "Settings":
+        st.header("Settings")
+        st.markdown("Adjust default behaviors and save to local `config.json` (optional).")
+        col1, col2 = st.columns(2)
+        with col1:
+            default_service_level = st.number_input("Default service level", 0.5, 0.999, float(CFG.get("default_service_level", 0.95)))
+            default_horizon = st.number_input("Default horizon (days)", 7, 730, int(CFG.get("default_horizon_days", 90)))
+        with col2:
+            default_seed = st.number_input("Default random seed", 0, 999999, int(CFG.get("random_seed", 42)))
+            default_workers = st.number_input("Default max workers (0=auto)", 0, 128, int(CFG.get("default_max_workers", 0)))
+        if st.button("Save settings to config.json"):
+            new_cfg = {
+                "default_service_level": float(default_service_level),
+                "default_horizon_days": int(default_horizon),
+                "random_seed": int(default_seed),
+                "default_max_workers": int(default_workers),
+                "data_path": data_folder,
+                "output_path": output_folder
+            }
+            with open("config.json", "w") as f:
+                json.dump(new_cfg, f, indent=2)
+            st.success("Saved config.json")
+
+    # Page: Data
+    elif page == "Data":
+        st.header("Data")
+        st.markdown("Provide input CSVs either by uploading them here or by pointing to a folder with required CSVs.")
+        st.markdown("**Required files (file name contains):** `sales` (sales history), `purchase`/`po` (purchase orders), `item` (item master).")
+        st.write("Current data folder:", data_folder)
+        st.write("Output folder:", output_folder)
+
+        if st.button("Re-run preprocessing (force)"):
+            try:
+                if upload_mode == "Upload CSVs" and sales_up and po_up and item_up:
+                    tmp_folder = os.path.join(output_folder, "_uploads_temp")
+                    os.makedirs(tmp_folder, exist_ok=True)
+                    sales_path = os.path.join(tmp_folder, "sales_history.csv")
+                    po_path = os.path.join(tmp_folder, "purchase_orders.csv")
+                    item_path = os.path.join(tmp_folder, "item_master.csv")
+                    with open(sales_path, "wb") as f:
+                        f.write(sales_up.getbuffer())
+                    with open(po_path, "wb") as f:
+                        f.write(po_up.getbuffer())
+                    with open(item_path, "wb") as f:
+                        f.write(item_up.getbuffer())
+                    processed_df = preprocess_all(sales_path, po_path, item_path, output_folder)
+                    st.success("Preprocessing complete.")
+                else:
+                    csvs = find_csv_files(data_folder)
+                    detected_sales = next((v for k, v in csvs.items() if "sales" in k), None)
+                    detected_po = next((v for k, v in csvs.items() if "purchase" in k or "po" in k), None)
+                    detected_item = next((v for k, v in csvs.items() if "item" in k), None)
+                    if detected_sales and detected_po and detected_item:
+                        processed_df = preprocess_all(detected_sales, detected_po, detected_item, output_folder)
+                        st.success("Preprocessing complete.")
+                    else:
+                        st.error("Could not detect required CSVs in folder. Upload CSVs or check folder.")
+            except Exception as e:
+                st.error(f"Preprocessing failed: {e}")
+
+        if not processed_df.empty:
+            st.subheader("Sample of processed item summary")
+            st.dataframe(processed_df.head(200))
+            st.download_button("Download processed item_summary.csv", data=processed_df.to_csv(index=False).encode("utf-8"),
+                               file_name="item_summary.csv", mime="text/csv")
+        else:
+            st.info("No processed item_summary.csv yet. Upload or set folder and run preprocessing.")
+
+if __name__ == "__main__":
+    main()
